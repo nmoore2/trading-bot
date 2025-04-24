@@ -36,56 +36,48 @@ def create_market_data():
         market_data = {
             'timestamp': datetime.now(),
             'symbol': SYMBOL,
-            'price': current_price,
-            'signals': {},
-            'levels': {},
-            'metrics': {}
+            'price': {
+                'current': current_price,
+                'price_change_pct': ((current_price - df.iloc[-2]['close']) / df.iloc[-2]['close']) * 100
+            },
+            'technical_indicators': {
+                'rsi': df.iloc[-1]['rsi'],
+                'vwap': df.iloc[-1]['vwap'],
+                'volume': {
+                    'current': df.iloc[-1]['volume'],
+                    'average': df.iloc[-1]['volume_ma_5']
+                }
+            },
+            'signal_analysis': {
+                'signals': {
+                    'vwap_reclaim': df.iloc[-1]['close'] > df.iloc[-1]['vwap'] and df.iloc[-2]['close'] <= df.iloc[-2]['vwap'],
+                    'rising_volume': df.iloc[-1]['volume'] > df.iloc[-1]['volume_ma_5'],
+                    'rsi_cross_50': df.iloc[-1]['rsi'] > 50 and df.iloc[-2]['rsi'] <= 50
+                },
+                'levels': {
+                    'entry': current_price,
+                    'stop_loss': current_price * 0.99,  # 1% stop loss
+                    'target': current_price * 1.02,  # 2% take profit
+                    'risk_reward_ratio': 2.0
+                }
+            }
         }
 
-        # Check for long setup signal
-        has_signal, signal_info = TechnicalIndicators.check_long_setup(df)
-        if has_signal and signal_info:
-            market_data['signals']['long_setup'] = True
-            market_data['levels'].update(signal_info['levels'])
-            market_data['metrics'].update(signal_info['metrics'])
-        else:
-            market_data['signals']['long_setup'] = False
-
-        # Check for momentum breakout signal
-        momentum_signals, momentum_levels, momentum_metrics = TechnicalIndicators.check_momentum_breakout(df)
-        if momentum_signals:
-            market_data['signals']['momentum'] = momentum_signals
-            market_data['levels'].update(momentum_levels)
-            market_data['metrics'].update(momentum_metrics)
-
-        # Print market data summary
         print("\nMarket Data Summary:")
-        print(f"Price: ${current_price:,.2f}")
-        print(f"Long Setup Signal: {market_data['signals'].get('long_setup', False)}")
-        if 'momentum' in market_data['signals']:
-            print("\nMomentum Signal Details:")
-            for k, v in market_data['signals']['momentum'].items():
-                print(f"  {k}: {'✓' if v else '✗'}")
-        
-        if market_data['levels']:
-            print("\nTrade Levels:")
-            for k, v in market_data['levels'].items():
-                print(f"  {k}: ${v:,.2f}")
-
-        if market_data['metrics']:
-            print("\nMetrics:")
-            for k, v in market_data['metrics'].items():
-                if isinstance(v, float):
-                    print(f"  {k}: {v:.2f}")
-                else:
-                    print(f"  {k}: {v}")
+        print(f"Current Price: ${current_price:,.2f}")
+        print(f"RSI: {market_data['technical_indicators']['rsi']:.1f}")
+        print(f"Volume vs 5-bar Average: {market_data['technical_indicators']['volume']['current'] / market_data['technical_indicators']['volume']['average']:.1f}x")
+        print("\nSignal Conditions:")
+        print(f"VWAP Reclaim: {'✓' if market_data['signal_analysis']['signals']['vwap_reclaim'] else '✗'}")
+        print(f"Rising Volume: {'✓' if market_data['signal_analysis']['signals']['rising_volume'] else '✗'}")
+        print(f"RSI Cross 50: {'✓' if market_data['signal_analysis']['signals']['rsi_cross_50'] else '✗'}")
 
         return market_data
 
     except Exception as e:
         print(f"Error creating market data: {str(e)}")
         print("\nFull error traceback:")
-        traceback.print_exc()
+        print(traceback.format_exc())
         return None
 
 def extract_gpt_summary(analysis):
