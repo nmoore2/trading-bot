@@ -1,5 +1,5 @@
 from alpaca.data.historical import CryptoHistoricalDataClient
-from alpaca.data.requests import CryptoBarsRequest
+from alpaca.data.requests import CryptoBarsRequest, CryptoLatestQuoteRequest
 from alpaca.data.timeframe import TimeFrame
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import (
@@ -35,23 +35,21 @@ class AlpacaClient:
         }
         
     def get_current_price(self):
-        """Get the current market price from position data"""
+        """Get the current market price from latest quote"""
         try:
-            # Get current position
-            position = self.get_position()
-            if position:
-                return float(position['current_price'])
-                
-            # If no position, get latest bar
-            request = CryptoBarsRequest(
-                symbol_or_symbols=SYMBOL,  # Keep the / for data client
-                timeframe=TimeFrame.Minute,
-                limit=1,
+            # Get latest quote (keep the / for crypto quotes)
+            request = CryptoLatestQuoteRequest(
+                symbol_or_symbols=SYMBOL,  # Keep BTC/USD format
                 feed=CryptoFeed.US
             )
-            bars = self.data_client.get_crypto_bars(request)
-            if not bars.df.empty:
-                return float(bars.df.iloc[-1].close)
+            quotes = self.data_client.get_crypto_latest_quote(request)
+            
+            if quotes and SYMBOL in quotes:
+                quote = quotes[SYMBOL]
+                # Use mid price (average of bid and ask) for current price
+                current_price = (float(quote.ask_price) + float(quote.bid_price)) / 2
+                print(f"Latest price from Alpaca: ${current_price:,.2f}")
+                return current_price
                 
             return None
         except Exception as e:
