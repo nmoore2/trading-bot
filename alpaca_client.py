@@ -16,116 +16,43 @@ import time
 
 class AlpacaClient:
     def __init__(self):
-        # Initialize market data client
-        self.data_client = CryptoHistoricalDataClient()
-        
-        # Initialize trading client
+        # Initialize both trading and data clients
         self.trading_client = TradingClient(
             ALPACA_API_KEY,
             ALPACA_API_SECRET,
             paper=USE_PAPER
         )
+        self.data_client = CryptoHistoricalDataClient(
+            ALPACA_API_KEY,
+            ALPACA_API_SECRET
+        )
         
-        # Map our interval to Alpaca's TimeFrame
+        # Map our intervals to Alpaca TimeFrames
         self.timeframe_map = {
             '1m': TimeFrame.Minute,
-            '5m': TimeFrame.Minute,
-            '15m': TimeFrame.Minute,
             '1h': TimeFrame.Hour,
             '1d': TimeFrame.Day
         }
         
-    def get_klines(self, limit=20):
-        """Fetch historical bars data"""
-        try:
-            print("\nFetching historical bars...")
-            
-            # Get the correct timeframe for the request
-            timeframe = self.timeframe_map.get(INTERVAL)
-            if not timeframe:
-                print(f"Invalid interval: {INTERVAL}")
-                return None
-                
-            print(f"Using interval: {INTERVAL}")
-            print(f"Symbol: {SYMBOL}")
-            
-            # Calculate start time based on limit and interval
-            interval_minutes = int(INTERVAL.replace('m', '')) if 'm' in INTERVAL else 60
-            start_time = datetime.now(timezone.utc) - timedelta(minutes=interval_minutes * limit)
-            
-            # Create request with start time
-            request_params = CryptoBarsRequest(
-                symbol_or_symbols=SYMBOL,
-                timeframe=timeframe,
-                start=start_time,
-                limit=limit
-            )
-            
-            # Get bars from US feed
-            print("Requesting data from Alpaca...")
-            bars = self.data_client.get_crypto_bars(request_params, feed=CryptoFeed.US)
-            
-            if bars is None:
-                print("No data received from Alpaca")
-                return None
-                
-            # Convert to DataFrame
-            print("Converting to DataFrame...")
-            df = bars.df.reset_index()
-            
-            if len(df) == 0:
-                print("DataFrame is empty")
-                return None
-                
-            # Rename columns to match our existing format
-            df = df.rename(columns={
-                'timestamp': 'timestamp',
-                'open': 'open',
-                'high': 'high',
-                'low': 'low',
-                'close': 'close',
-                'volume': 'volume'
-            })
-            
-            # Group by timestamp to combine data from all exchanges
-            df = df.groupby('timestamp').agg({
-                'open': 'first',
-                'high': 'max',
-                'low': 'min',
-                'close': 'last',
-                'volume': 'sum'
-            }).reset_index()
-            
-            print(f"Retrieved {len(df)} bars")
-            
-            # Print first and last bar for debugging
-            if len(df) > 0:
-                print("\nFirst bar:")
-                print(f"Time: {df.iloc[0]['timestamp']}")
-                print(f"Close: ${df.iloc[0]['close']:,.2f}")
-                print(f"Volume: {df.iloc[0]['volume']:,.2f}")
-                
-                print("\nLast bar:")
-                print(f"Time: {df.iloc[-1]['timestamp']}")
-                print(f"Close: ${df.iloc[-1]['close']:,.2f}")
-                print(f"Volume: {df.iloc[-1]['volume']:,.2f}")
-            
-            return df
-            
-        except Exception as e:
-            print(f"Error fetching klines: {e}")
-            import traceback
-            print("\nFull error traceback:")
-            print(traceback.format_exc())
-            return None
-            
     def get_current_price(self):
-        """Get the current market price for the symbol"""
+        """Get the current market price from position data"""
         try:
-            # Get the latest bar
-            df = self.get_klines(limit=1)
-            if df is not None and not df.empty:
-                return float(df.iloc[-1]['close'])
+            # Get current position
+            position = self.get_position()
+            if position:
+                return float(position['current_price'])
+                
+            # If no position, get latest bar
+            request = CryptoBarsRequest(
+                symbol_or_symbols=SYMBOL,  # Keep the / for data client
+                timeframe=TimeFrame.Minute,
+                limit=1,
+                feed=CryptoFeed.US
+            )
+            bars = self.data_client.get_crypto_bars(request)
+            if not bars.df.empty:
+                return float(bars.df.iloc[-1].close)
+                
             return None
         except Exception as e:
             print(f"Error getting current price: {e}")

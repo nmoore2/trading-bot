@@ -1,6 +1,5 @@
 from alpaca_client import AlpacaClient
 from indicators import TechnicalIndicators
-import pandas as pd
 import time
 
 def main():
@@ -10,38 +9,35 @@ def main():
     
     print("\n=== Testing Signal Logic ===")
     
-    # Get recent market data
-    print("\nFetching market data...")
-    klines = client.get_klines(limit=20)  # Get last 20 candles
+    # Get current price and position
+    print("\nChecking current position and price...")
+    position = client.get_position()
+    current_price = client.get_current_price()
     
-    if not klines:
-        print("✗ Failed to fetch market data")
+    if not current_price:
+        print("✗ Failed to get current price")
         return
         
-    # Convert to DataFrame
-    df = pd.DataFrame(klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-    df = df.astype({
-        'open': float,
-        'high': float,
-        'low': float,
-        'close': float,
-        'volume': float
-    })
+    print(f"\nCurrent BTC/USD price: ${current_price:,.2f}")
     
-    # Calculate all indicators
-    print("\nCalculating technical indicators...")
-    df = indicators.calculate_all_indicators(df)
-    
-    # Check for long setup
-    print("\nChecking for long setup...")
-    setup = indicators.check_long_setup(df)
-    
-    if setup:
-        print("\n✓ Long setup detected!")
-        print("\nTrade Parameters:")
-        print(f"Entry: ${setup['entry']:,.2f}")
-        print(f"Stop Loss: ${setup['stop_loss']:,.2f}")
-        print(f"Take Profit: ${setup['take_profit']:,.2f}")
+    if position:
+        print("\nCurrent position:")
+        print(f"Side: {position['side']}")
+        print(f"Quantity: {position['qty']}")
+        print(f"Entry Price: ${float(position['avg_entry_price']):,.2f}")
+        print(f"Market Value: ${float(position['market_value']):,.2f}")
+        print(f"Unrealized P&L: ${float(position['unrealized_pl']):,.2f}")
+        
+        # Get stop loss and take profit from open orders
+        orders = client.get_open_orders()
+        if orders:
+            for order in orders:
+                if order['type'] == 'stop':
+                    print(f"Stop Loss: ${float(order['stop_price']):,.2f}")
+                elif order['type'] == 'limit':
+                    print(f"Take Profit: ${float(order['limit_price']):,.2f}")
+    else:
+        print("\nNo open position")
         
         # Optional: Execute test trade
         print("\nWould you like to execute a test trade? (y/n)")
@@ -70,8 +66,6 @@ def main():
                     print("✗ No position found")
             else:
                 print("✗ Failed to execute test trade")
-    else:
-        print("\n✗ No long setup detected")
 
 if __name__ == "__main__":
     main() 
