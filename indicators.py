@@ -202,13 +202,21 @@ class TechnicalIndicators:
         return signals, levels, metrics
 
     @staticmethod
+    def calculate_ema(df):
+        """Calculate Exponential Moving Averages"""
+        # Calculate EMAs
+        df['ema_5'] = df['close'].ewm(span=5, adjust=False).mean()
+        df['ema_20'] = df['close'].ewm(span=20, adjust=False).mean()
+        return df
+
+    @staticmethod
     def calculate_all_indicators(df):
         """Calculate all technical indicators"""
         df = TechnicalIndicators.calculate_vwap(df)
         df = TechnicalIndicators.calculate_rsi(df)
         df = TechnicalIndicators.calculate_volume(df)
         df = TechnicalIndicators.calculate_cvd(df)
-        df = TechnicalIndicators.calculate_momentum_indicators(df)  # Add momentum indicators
+        df = TechnicalIndicators.calculate_ema(df)  # Add EMA calculation
         return df
 
     @staticmethod
