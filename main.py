@@ -1,11 +1,12 @@
 from binance_client import BinanceClient
 from alpaca_client import AlpacaClient
+from mexc_client import MEXCClient
 from notification_service import NotificationService
 from gpt_signal_checker import GPTSignalChecker
 from indicators import TechnicalIndicators
 import time
 from datetime import datetime, timedelta
-from config import SYMBOL, RSI_OVERSOLD, RSI_OVERBOUGHT, VOLUME_LOOKBACK, VOLUME_THRESHOLD, INTERVAL
+from config import SYMBOL, MEXC_SYMBOL, RSI_OVERSOLD, RSI_OVERBOUGHT, VOLUME_LOOKBACK, VOLUME_THRESHOLD, INTERVAL
 import json
 import sys
 from trade_history import TradeHistory
@@ -15,7 +16,9 @@ import traceback
 # Initialize clients
 binance_client = BinanceClient()
 alpaca_client = AlpacaClient()
+mexc_client = MEXCClient()
 trade_history = TradeHistory()
+notifier = NotificationService()
 
 def create_market_data():
     """Create market data dictionary with technical indicators"""
@@ -24,13 +27,33 @@ def create_market_data():
         df = binance_client.get_klines(limit=100)
         if df is None or len(df) == 0:
             print("No data received from Binance")
+            notifier.send_error("Failed to get market data from Binance")
             return None
 
         # Get current price
         current_price = binance_client.get_current_price()
         if current_price is None:
             print("Failed to get current price")
+            notifier.send_error("Failed to get current price from Binance")
             return None
+
+        print("\nMarket Data Summary:")
+        print(f"Current Price: ${current_price:,.2f}")
+        # print(f"RSI: {df.iloc[-1]['rsi']:.1f}")
+        print(f"Volume vs 5-bar Average: {df.iloc[-1]['volume_ratio_5']:.1f}x")
+
+        print("\nVWAP Reclaim (5m) Conditions:")
+        print(f"VWAP Reclaim: {'✓' if df.iloc[-1]['close'] > df.iloc[-1]['vwap'] and df.iloc[-2]['close'] <= df.iloc[-2]['vwap'] else '✗'}")
+        print(f"Rising Volume: {'✓' if df.iloc[-1]['volume'] > df.iloc[-1]['volume_ma_5'] and df.iloc[-1]['volume'] > df.iloc[-1]['volume_ma_20'] else '✗'}")
+        # print(f"RSI Cross 50: {'✓' if df.iloc[-1]['rsi'] > 50 and df.iloc[-2]['rsi'] <= 50 else '✗'}")
+        print(f"CVD Rising: {'✓' if df.iloc[-1]['cvd'] > df.iloc[-2]['cvd'] and df.iloc[-2]['cvd'] > df.iloc[-3]['cvd'] else '✗'}")
+
+        print("\nMomentum Strategy Conditions:")
+        print(f"Price > EMA: {'✓' if df.iloc[-1]['close'] > df.iloc[-1]['ema_5'] else '✗'}")
+        print(f"Higher Highs: {'✓' if df.iloc[-1]['high'] > df.iloc[-2]['high'] and df.iloc[-2]['high'] > df.iloc[-3]['high'] else '✗'}")
+        print(f"Higher Lows: {'✓' if df.iloc[-1]['low'] > df.iloc[-2]['low'] and df.iloc[-2]['low'] > df.iloc[-3]['low'] else '✗'}")
+        print(f"Volume > Avg: {'✓' if df.iloc[-1]['volume'] > df.iloc[-1]['volume_ma_5'] else '✗'}")
+        # print(f"RSI > 40: {'✓' if df.iloc[-1]['rsi'] > 40 else '✗'}")
 
         # Create market data dictionary
         market_data = {
@@ -63,15 +86,6 @@ def create_market_data():
             }
         }
 
-        print("\nMarket Data Summary:")
-        print(f"Current Price: ${current_price:,.2f}")
-        print(f"RSI: {market_data['technical_indicators']['rsi']:.1f}")
-        print(f"Volume vs 5-bar Average: {market_data['technical_indicators']['volume']['current'] / market_data['technical_indicators']['volume']['average']:.1f}x")
-        print("\nSignal Conditions:")
-        print(f"VWAP Reclaim: {'✓' if market_data['signal_analysis']['signals']['vwap_reclaim'] else '✗'}")
-        print(f"Rising Volume: {'✓' if market_data['signal_analysis']['signals']['rising_volume'] else '✗'}")
-        print(f"RSI Cross 50: {'✓' if market_data['signal_analysis']['signals']['rsi_cross_50'] else '✗'}")
-
         return market_data
 
     except Exception as e:
@@ -96,61 +110,62 @@ def extract_gpt_summary(analysis):
     
     return " | ".join(summary)
 
-def execute_trade(signal_type, entry_price, stop_loss, take_profit, strategy_name="original"):
-    """Execute a trade based on the signal"""
+def execute_trade(signal_type, entry_price, stop_loss, take_profit, strategy_name="original", signals=None):
+    """Execute trade on MEXC based on signal"""
     try:
-        # Convert BTC/USD to BTCUSD for Alpaca
-        trading_symbol = SYMBOL.replace('/', '')
+        # Calculate position size based on account balance
+        balance = mexc_client.get_account_balance()
+        if not balance:
+            print("Failed to get account balance")
+            return False
+            
+        # Find USDT balance
+        usdt_balance = next((asset['free'] for asset in balance['balances'] if asset['asset'] == 'USDT'), 0)
         
-        # Calculate position size (1% of portfolio)
-        account = alpaca_client.get_account()
-        equity = float(account.equity)
-        position_size = equity * 0.01  # 1% of portfolio
+        # Use 1% of USDT balance for the trade
+        position_size = float(usdt_balance) * 0.01 / entry_price
         
-        # Calculate quantity based on position size and entry price
-        quantity = position_size / entry_price
-        
-        # Round quantity to 6 decimal places for BTC
-        quantity = round(quantity, 6)
-        
-        print(f"\nExecuting {signal_type} trade:")
-        print(f"Entry Price: ${entry_price:,.2f}")
-        print(f"Stop Loss: ${stop_loss:,.2f}")
-        print(f"Take Profit: ${take_profit:,.2f}")
-        print(f"Position Size: ${position_size:,.2f}")
-        print(f"Quantity: {quantity} BTC")
-        
-        # Place bracket order with Alpaca
-        order = alpaca_client.place_bracket_order(
-            symbol=trading_symbol,
-            qty=quantity,
-            side=signal_type,
-            stop_loss=stop_loss,
-            take_profit=take_profit
+        # Place order on MEXC
+        order = mexc_client.place_order(
+            symbol=MEXC_SYMBOL,
+            side='BUY' if signal_type == 'LONG' else 'SELL',
+            quantity=position_size,
+            price=entry_price
         )
         
-        if order:
-            print("\nTrade executed successfully!")
-            print(f"Order ID: {order.id}")
+        if not order:
+            print("Failed to place order")
+            return False
             
-            # Log the trade
-            trade_history.log_trade(
-                symbol=SYMBOL,
+        # Record trade in history
+        trade_history.add_trade({
+            'exchange': 'MEXC',
+            'symbol': MEXC_SYMBOL,
+            'type': signal_type,
+            'entry_price': entry_price,
+            'stop_loss': stop_loss,
+            'take_profit': take_profit,
+            'strategy': strategy_name,
+            'timestamp': datetime.now().isoformat(),
+            'order_id': order['orderId']
+        })
+            
+        # Send notification
+        notifier.send_trade_notification(
+            exchange='MEXC',
+            symbol=MEXC_SYMBOL,
+            signal_type=signal_type,
                 entry_price=entry_price,
                 stop_loss=stop_loss,
                 take_profit=take_profit,
-                quantity=quantity,
-                side=signal_type,
-                strategy=strategy_name
-            )
+            strategy_name=strategy_name
+        )
             
             return True
-        else:
-            print("Failed to execute trade")
-            return False
             
     except Exception as e:
         print(f"Error executing trade: {str(e)}")
+        traceback.print_exc()
         return False
 
 def parse_gpt_response(response):
@@ -260,6 +275,43 @@ def test_signals():
             
     print(f"\nFound {signals_found} signals in {len(df)} bars")
 
+def display_position(position, orders=None):
+    """Display current position information"""
+    if position:
+        print("\nCurrent Position:")
+        print(f"Side: {'LONG' if float(position['qty']) > 0 else 'SHORT'}")
+        print(f"Quantity: {abs(float(position['qty'])):.6f} {SYMBOL}")
+        print(f"Entry Price: ${float(position['avg_entry_price']):,.2f}")
+        print(f"Current Price: ${float(position['current_price']):,.2f}")
+        print(f"Market Value: ${float(position['market_value']):,.2f}")
+        print(f"Unrealized P&L: ${float(position['unrealized_pl']):,.2f} ({float(position['unrealized_plpc'])*100:.2f}%)")
+        
+        # Get stop loss and take profit from open orders
+        stop_loss = None
+        take_profit = None
+        
+        if orders:
+            for order in orders:
+                if order.get('type') == 'stop':
+                    stop_loss = float(order.get('stop_price', 0))
+                elif order.get('type') == 'limit':
+                    take_profit = float(order.get('limit_price', 0))
+                    
+        # If no orders found, calculate default levels
+        if not stop_loss or not take_profit:
+            entry_price = float(position['avg_entry_price'])
+            if float(position['qty']) > 0:  # Long position
+                stop_loss = entry_price * 0.99  # 1% below entry
+                take_profit = entry_price * 1.02  # 2% above entry
+            else:  # Short position
+                stop_loss = entry_price * 1.01  # 1% above entry
+                take_profit = entry_price * 0.98  # 2% below entry
+                
+        print(f"Stop Loss: ${stop_loss:,.2f}")
+        print(f"Take Profit: ${take_profit:,.2f}")
+    else:
+        print("\nNo open position")
+
 def main(test_mode=False):
     """Main function to run the trading bot"""
     if test_mode:
@@ -271,74 +323,17 @@ def main(test_mode=False):
     print(f"Testing with {SYMBOL}")
     print("==================================================\n")
     
-    # Check for existing positions on startup
-    print("\nChecking for existing positions...")
-    position = alpaca_client.get_position()
-    if position:
-        print("\nFound open position:")
-        print(f"Side: {position['side']}")
-        print(f"Quantity: {position['qty']} {SYMBOL}")
-        print(f"Entry Price: ${position['avg_entry_price']:,.2f}")
-        print(f"Current Price: ${position['current_price']:,.2f}")
-        print(f"Market Value: ${position['market_value']:,.2f}")
-        print(f"Unrealized P&L: ${position['unrealized_pl']:.2f} ({position['unrealized_plpc']:.2f}%)")
-        
-        # Get open orders to find stop loss and take profit levels
-        orders = alpaca_client.get_open_orders()
-        if orders:
-            for order in orders:
-                if order['type'] == 'stop':
-                    print(f"Stop Loss: ${float(order['stop_price']):,.2f}")
-                elif order['type'] == 'limit':
-                    print(f"Take Profit: ${float(order['limit_price']):,.2f}")
-        else:
-            # If no open orders, calculate default levels based on entry price
-            entry_price = float(position['avg_entry_price'])
-            if position['side'] == 'long':
-                print(f"Stop Loss: ${entry_price * 0.99:,.2f}")
-                print(f"Take Profit: ${entry_price * 1.02:,.2f}")
-            else:
-                print(f"Stop Loss: ${entry_price * 1.01:,.2f}")
-                print(f"Take Profit: ${entry_price * 0.98:,.2f}")
-        
-        print("----------------------------------------")
-    else:
-        print("No open positions found")
-        print("----------------------------------------")
-    
     try:
         while True:
-            print(f"\nChecking for signals - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            print(f"\nChecking for signals - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
             
             # Check for open positions and display P&L
             position = alpaca_client.get_position()
             if position:
-                print("\nCurrent Position:")
-                print(f"Side: {position['side']}")
-                print(f"Quantity: {position['qty']} {SYMBOL}")
-                print(f"Entry Price: ${position['avg_entry_price']:,.2f}")
-                print(f"Current Price: ${position['current_price']:,.2f}")
-                print(f"Market Value: ${position['market_value']:,.2f}")
-                print(f"Unrealized P&L: ${position['unrealized_pl']:.2f} ({position['unrealized_plpc']:.2f}%)")
-                
-                # Get open orders to find stop loss and take profit levels
                 orders = alpaca_client.get_open_orders()
-                if orders:
-                    for order in orders:
-                        if order['type'] == 'stop':
-                            print(f"Stop Loss: ${float(order['stop_price']):,.2f}")
-                        elif order['type'] == 'limit':
-                            print(f"Take Profit: ${float(order['limit_price']):,.2f}")
-                else:
-                    # If no open orders, calculate default levels based on entry price
-                    entry_price = float(position['avg_entry_price'])
-                    if position['side'] == 'long':
-                        print(f"Stop Loss: ${entry_price * 0.99:,.2f}")
-                        print(f"Take Profit: ${entry_price * 1.02:,.2f}")
-                    else:
-                        print(f"Stop Loss: ${entry_price * 1.01:,.2f}")
-                        print(f"Take Profit: ${entry_price * 0.98:,.2f}")
-                
+                display_position(position, orders)
+            else:
+                print("\nNo open positions")
                 print("----------------------------------------")
             
             # Get market data and check for signals
@@ -349,26 +344,27 @@ def main(test_mode=False):
                 time.sleep(30)
                 continue
             
-            # Check for original strategy signals
+            # Check for VWAP reclaim strategy signals
             if market_data.get('signals'):
-                # Check original strategy signals
                 if market_data['signals'].get('long_setup', False):
-                    print("\nOriginal Strategy Signal Detected!")
+                    print("\nVWAP Reclaim (5m) Signal Detected!")
                     execute_trade(
                         signal_type='BUY',
                         entry_price=market_data['levels']['entry'],
                         stop_loss=market_data['levels']['stop_loss'],
                         take_profit=market_data['levels']['target'],
-                        strategy_name='original'
+                        strategy_name='vwap_reclaim_5m',
+                        signals=market_data['signals']
                     )
             
             # Check for momentum strategy signals
             if market_data.get('signals', {}).get('momentum'):
+                momentum_signals = market_data['signals']['momentum']
                 has_momentum_signal = (
-                    market_data['signals']['momentum']['price_above_ema'] and
-                    (market_data['signals']['momentum']['higher_highs'] or market_data['signals']['momentum']['higher_lows']) and
-                    market_data['signals']['momentum']['volume_above_avg'] and
-                    market_data['signals']['momentum']['rsi_above_threshold']
+                    momentum_signals['price_above_ema'] and
+                    (momentum_signals['higher_highs'] or momentum_signals['higher_lows']) and
+                    momentum_signals['volume_above_avg'] and
+                    momentum_signals['rsi_above_threshold']
                 )
                 if has_momentum_signal:
                     print("\nMomentum Strategy Signal Detected!")
@@ -377,7 +373,8 @@ def main(test_mode=False):
                         entry_price=market_data['levels']['entry'],
                         stop_loss=market_data['levels']['stop_loss'],
                         take_profit=market_data['levels']['target'],
-                        strategy_name='momentum'
+                        strategy_name='momentum',
+                        signals=momentum_signals
                     )
             
             print("\nWaiting 30 seconds before retrying...")

@@ -15,42 +15,23 @@ class TechnicalIndicators:
         return df
 
     @staticmethod
-    def calculate_rsi(df, period=5):
-        """Calculate RSI(5) using Wilder's formula"""
+    def calculate_rsi(df, period=14):
+        """Calculate RSI and add to dataframe"""
         # Calculate price changes
         delta = df['close'].diff()
         
-        # Get rid of the first row, which is NaN
-        delta = delta[1:]
+        # Separate gains and losses
+        gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
         
-        # Make the positive gains (up) and negative gains (down) Series
-        up, down = delta.copy(), delta.copy()
-        up[up < 0] = 0
-        down[down > 0] = 0
-        down = down.abs()  # Make losses positive
-        
-        # Calculate EWMA (exponentially weighted moving average)
-        # Wilder's smoothing
-        roll_up = up.ewm(alpha=1/period, min_periods=period).mean()
-        roll_down = down.ewm(alpha=1/period, min_periods=period).mean()
-        
-        # Calculate RS
-        rs = roll_up / roll_down
-        
-        # Calculate RSI
-        rsi = 100.0 - (100.0 / (1.0 + rs))
-        
-        # Add RSI to dataframe
-        df['rsi'] = rsi
-        
-        # Handle edge cases
-        df['rsi'] = df['rsi'].fillna(50)  # Fill NaN with neutral value
-        df['rsi'] = df['rsi'].clip(0, 100)  # Ensure RSI is between 0 and 100
+        # Calculate RS and RSI
+        rs = gain / loss
+        df['rsi'] = 100 - (100 / (1 + rs))
         
         # Print RSI values for debugging
-        print("\nRSI Analysis:")
-        print(f"Current RSI: {df['rsi'].iloc[-1]:.1f}")
-        print(f"Previous RSI: {df['rsi'].iloc[-2]:.1f}")
+        # print("\nRSI Analysis:")
+        # print(f"Current RSI: {df['rsi'].iloc[-1]:.1f}")
+        # print(f"Previous RSI: {df['rsi'].iloc[-2]:.1f}")
         
         # RSI cross above 50 signal
         df['rsi_cross_50'] = (df['rsi'] > 50) & (df['rsi'].shift(1) <= 50)
@@ -81,19 +62,19 @@ class TechnicalIndicators:
         df['relative_volume'] = df['volume_ratio_5'].round(2)
         
         # Print detailed volume debug info for the last bar
-        if len(df) > 0:
-            last_bar = df.iloc[-1]
-            print(f"\nVolume Analysis:")
-            print(f"Current Volume: {last_bar['volume']:,.2f}")
-            print(f"5-bar Avg Volume: {last_bar['volume_ma_5']:,.2f}")
-            print(f"20-bar Avg Volume: {last_bar['volume_ma_20']:,.2f}")
-            print(f"Relative Volume (5-bar): {last_bar['volume_ratio_5']:,.2f}x")
-            print(f"Relative Volume (20-bar): {last_bar['volume_ratio_20']:,.2f}x")
-            print(f"Volume Trend: {(last_bar['volume_trend']*100):,.1f}%")
-            print(f"Rising Volume Signal:")
-            print(f"  - vs 5-bar MA: {'✓' if last_bar['rising_volume_short'] else '✗'}")
-            print(f"  - vs 20-bar MA: {'✓' if last_bar['rising_volume_long'] else '✗'}")
-            print(f"  - Overall: {'✓' if last_bar['rising_volume'] else '✗'}")
+        # if len(df) > 0:
+        #     last_bar = df.iloc[-1]
+        #     print(f"\nVolume Analysis:")
+        #     print(f"Current Volume: ${last_bar['volume']:,.2f}")
+        #     print(f"5-bar Avg Volume: ${last_bar['volume_ma_5']:,.2f}")
+        #     print(f"20-bar Avg Volume: ${last_bar['volume_ma_20']:,.2f}")
+        #     print(f"Relative Volume (5-bar): {last_bar['volume_ratio_5']:.1f}x")
+        #     print(f"Relative Volume (20-bar): {last_bar['volume_ratio_20']:.1f}x")
+        #     print(f"Volume Trend: {(last_bar['volume_trend']*100):,.1f}%")
+        #     print(f"Rising Volume Signal:")
+        #     print(f"  - vs 5-bar MA: {'✓' if last_bar['rising_volume_short'] else '✗'}")
+        #     print(f"  - vs 20-bar MA: {'✓' if last_bar['rising_volume_long'] else '✗'}")
+        #     print(f"  - Overall: {'✓' if last_bar['rising_volume'] else '✗'}")
         
         return df
 
@@ -135,6 +116,7 @@ class TechnicalIndicators:
         """Calculate additional momentum indicators"""
         # Calculate EMAs
         df['ema_5'] = df['close'].ewm(span=5, adjust=False).mean()
+        df['ema_20'] = df['close'].ewm(span=20, adjust=False).mean()
         
         # Calculate price patterns
         df['higher_high'] = (df['high'] > df['high'].shift(1)) & (df['high'].shift(1) > df['high'].shift(2))
@@ -216,7 +198,7 @@ class TechnicalIndicators:
         df = TechnicalIndicators.calculate_rsi(df)
         df = TechnicalIndicators.calculate_volume(df)
         df = TechnicalIndicators.calculate_cvd(df)
-        df = TechnicalIndicators.calculate_ema(df)  # Add EMA calculation
+        df = TechnicalIndicators.calculate_momentum_indicators(df)  # This includes EMA calculations
         return df
 
     @staticmethod
@@ -257,7 +239,7 @@ class TechnicalIndicators:
         # Calculate entry, stop loss, and take profit levels
         entry = current['close']
         stop_loss = entry * 0.99  # 1% stop loss
-        take_profit = entry * 1.02  # 2% take profit
+        take_profit = entry * 1.02
         
         # Create trade info dictionary
         trade_info = {
@@ -275,10 +257,10 @@ class TechnicalIndicators:
             }
         }
         
-        # Signal is valid if all conditions are met
+        # Signal is valid if all conditions are met (except volume)
         has_signal = (
             vwap_reclaim and
-            volume_confirmation and
+            # volume_confirmation and  # Commenting out volume requirement
             rsi_cross and
             cvd_signals['cvd_rising']
         )
