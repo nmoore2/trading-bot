@@ -24,6 +24,9 @@ wheels/
 venv/
 env/
 ENV/
+.venv/
+.venv/*
+!venv/.gitkeep
 
 # IDE
 .idea/
@@ -37,7 +40,17 @@ config.py
 *.log
 trades.json
 .env
+config.json
 
 # OS specific
 .DS_Store
-Thumbs.db 
+Thumbs.db
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# Python cache
+.pytest_cache/
+.coverage
+htmlcov/ 
