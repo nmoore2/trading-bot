@@ -9,7 +9,7 @@ import os
 from openai import OpenAI
 from config import OPENAI_API_KEY
 from notification_service import NotificationService
-from hyperliquid_trader import execute_trade, get_open_position
+from hyperliquid_trader import execute_trade, get_open_position, calculate_position_size
 import tiktoken
 import logging
 
@@ -107,10 +107,10 @@ def get_oi_change_ma(oi_change_history, window=5):
 # --- Signal-worthy event detection ---
 def shouldSendToGPT(snapshot, last_sent_time, oi_change_history, min_interval_minutes=30, last_recommendation=None, last_confidence=None):
     now = datetime.now(timezone.utc)
-    # Cooldown: Only call GPT if >3min since last call, unless last confidence >= 0.85
+    # Cooldown: Only call GPT if >5min since last call, unless last confidence >= 0.85
     if last_sent_time is not None:
         time_since_last = (now - last_sent_time).total_seconds() / 60
-        if time_since_last < 3 and (last_confidence is None or last_confidence < 0.85):
+        if time_since_last < 5 and (last_confidence is None or last_confidence < 0.85):
             return False, 'cooldown'
     
     # 1. Sudden delta imbalance
@@ -395,50 +395,138 @@ if __name__ == "__main__":
                 take_profit = float(gpt_data.get('take_profit')) if gpt_data and gpt_data.get('take_profit') not in [None, "null", "None", ""] else None
                 side = 'BUY' if "LONG" in last_recommendation else 'SELL'
                 rr = calculate_risk_reward(entry_price, stop_loss, take_profit, side)
-                threshold = 1.0
-                trade_icon = "🟢" if rr is not None and rr >= threshold else "🟡"
-                print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-                print(f"🚨 \033[1mTRADE DECISION\033[0m {trade_icon}")
-                print(f"📊 Risk/Reward: \033[1m{rr:.1f}\033[0m")
-                if rr is None or rr < threshold:
-                    print(f"❌ \033[1mSKIPPED\033[0m: Risk/reward below threshold for {side} entry {entry_price}, SL {stop_loss}, TP {take_profit}.")
-                else:
-                    print(f"🚀 \033[1mTRADE PROCEEDING\033[0m: Risk/reward meets threshold for {side} entry {entry_price}, SL {stop_loss}, TP {take_profit}.")
-                    signal = {
-                        "side": side,
-                        "symbol": "BTC",  # or dynamic if you want
-                        "size": 0.001,
-                        "order_type": "limit" if entry_price else "market",
-                        "limit_price": entry_price,
-                        "stop_loss": stop_loss,
-                        "take_profit": take_profit
+                confidence = last_confidence
+                # New trade entry logic
+                should_trade = (
+                    (confidence >= 0.7 and rr is not None and rr >= 1.0) or
+                    (confidence >= 0.8 and rr is not None and rr >= 0.8) or
+                    (confidence >= 0.9 and rr is not None and rr >= 0.7)
+                )
+                # Check for high-confidence sell signal to close long
+                pos = get_open_position("BTC")
+                if last_recommendation == "ENTER SHORT" and confidence > 0.8 and pos['side'] == 'LONG' and abs(pos['size']) > 0:
+                    print(f"🔻 High-confidence SELL signal: Closing LONG position of size {pos['size']} for BTC.")
+                    close_signal = {
+                        "side": 'SELL',
+                        "symbol": "BTC",
+                        "size": abs(pos['size']),
+                        "order_type": "market",
+                        "limit_price": None,
+                        "stop_loss": None,
+                        "take_profit": None,
+                        "reduce_only": True
                     }
-                    pos = get_open_position(signal["symbol"])
-                    new_side = 'LONG' if signal["side"] == 'BUY' else 'SHORT'
-                    if pos['side'] == new_side and abs(pos['size']) > 0:
-                        print(f"⏸️ \033[1mSKIPPED\033[0m: Already in a {pos['side']} position of size {pos['size']} for {signal['symbol']}.")
-                    else:
-                        print(f"🚀 \033[1mPLACING TRADE\033[0m: {signal}")
-                        try:
-                            result = execute_trade(signal)
-                            print("Hyperliquid trade result:", result)
-                            if result and result.get("main_order") and result["main_order"].get("status") == "ok":
-                                print("✅ \033[1mTrade placed successfully on Hyperliquid.\033[0m")
-                                if result.get("sl_order_id"):
-                                    print(f"🛑 Stop loss order ID: {result['sl_order_id']}")
-                                if result.get("tp_order_id"):
-                                    print(f"🎯 Take profit order ID: {result['tp_order_id']}")
-                                # Only send notification if trade is placed
-                                notification_service.send_notification(
-                                    title=f"{side} | R/R {rr:.1f} | BTCUSD",  # Side and risk/reward in preview
-                                    message=f"{side} trade placed at {entry_price} (SL: {stop_loss}, TP: {take_profit}, R/R: {rr:.1f})",
-                                    priority=1
-                                )
-                                print(f"[Pushover] Notification sent.")
-                            else:
-                                print("❌ \033[1mTrade failed or was not accepted by Hyperliquid.\033[0m")
-                        except Exception as e:
-                            print(f"❌ \033[1mError placing trade on Hyperliquid: {e}\033[0m")
+                    try:
+                        close_result = execute_trade(close_signal)
+                        print("Position close result:", close_result)
+                        print("✅ LONG position closed on high-confidence SELL signal.")
+                    except Exception as e:
+                        print(f"❌ Error closing LONG position: {e}")
+                # Check for high-confidence buy signal to close short
+                if last_recommendation == "ENTER LONG" and confidence > 0.8 and pos['side'] == 'SHORT' and abs(pos['size']) > 0:
+                    print(f"🔺 High-confidence BUY signal: Closing SHORT position of size {pos['size']} for BTC.")
+                    close_signal = {
+                        "side": 'BUY',
+                        "symbol": "BTC",
+                        "size": abs(pos['size']),
+                        "order_type": "market",
+                        "limit_price": None,
+                        "stop_loss": None,
+                        "take_profit": None,
+                        "reduce_only": True
+                    }
+                    try:
+                        close_result = execute_trade(close_signal)
+                        print("Position close result:", close_result)
+                        print("✅ SHORT position closed on high-confidence BUY signal.")
+                    except Exception as e:
+                        print(f"❌ Error closing SHORT position: {e}")
+                if not should_trade:
+                    print(f"❌ \033[1mSKIPPED\033[0m: Trade does not meet confidence/RR criteria (confidence={confidence:.2f}, RR={rr})")
+                    continue
+                # Calculate dynamic position size (risk 1% of equity)
+                position_size = calculate_position_size(entry_price, stop_loss)
+                if position_size is None or position_size == 0:
+                    print(f"❌ \033[1mSKIPPED\033[0m: Could not calculate position size (missing equity or stop loss).")
+                    continue
+                signal = {
+                    "side": side,
+                    "symbol": "BTC",  # or dynamic if you want
+                    "size": position_size,
+                    "order_type": "market",
+                    "limit_price": None,
+                    "stop_loss": stop_loss,
+                    "take_profit": take_profit
+                }
+                pos = get_open_position(signal["symbol"])
+                new_side = 'LONG' if signal["side"] == 'BUY' else 'SHORT'
+                # --- Position flip logic ---
+                if pos['side'] == new_side and abs(pos['size']) > 0:
+                    print(f"⏸️ \033[1mSKIPPED\033[0m: Already in a {pos['side']} position of size {pos['size']} for {signal['symbol']}.")
+                elif pos['side'] != 'NONE' and pos['side'] != new_side and abs(pos['size']) > 0:
+                    print(f"🔄 \033[1mFLIP\033[0m: Closing {pos['side']} position of size {pos['size']} for {signal['symbol']} before opening {new_side}.")
+                    # 1. Close current position
+                    close_signal = {
+                        "side": 'SELL' if pos['side'] == 'LONG' else 'BUY',
+                        "symbol": signal["symbol"],
+                        "size": abs(pos['size']),
+                        "order_type": "market",
+                        "limit_price": None,
+                        "stop_loss": None,
+                        "take_profit": None,
+                        "reduce_only": True
+                    }
+                    try:
+                        close_result = execute_trade(close_signal)
+                        print("Position close result:", close_result)
+                        print("✅ \033[1mPosition closed. Waiting before opening new position...\033[0m")
+                        time.sleep(2)  # Short delay to ensure position is closed
+                    except Exception as e:
+                        print(f"❌ \033[1mError closing position: {e}\033[0m")
+                    # 2. Open new position
+                    print(f"📊 \033[1mRisk/Reward\033[0m: {rr:.3f}")
+                    print(f"🚀 \033[1mPLACING NEW TRADE\033[0m: {signal}")
+                    try:
+                        result = execute_trade(signal)
+                        print("Hyperliquid trade result:", result)
+                        if result and result.get("main_order") and result["main_order"].get("status") == "ok":
+                            print("✅ \033[1mTrade placed successfully on Hyperliquid.\033[0m")
+                            if result.get("sl_order_id"):
+                                print(f"🛑 Stop loss order ID: {result['sl_order_id']}")
+                            if result.get("tp_order_id"):
+                                print(f"🎯 Take profit order ID: {result['tp_order_id']}")
+                            notification_service.send_notification(
+                                title=f"{side} | R/R {rr:.1f} | BTCUSD",
+                                message=f"{side} trade placed at {entry_price} (SL: {stop_loss}, TP: {take_profit}, R/R: {rr:.1f})",
+                                priority=1
+                            )
+                            print(f"[Pushover] Notification sent.")
+                        else:
+                            print("❌ \033[1mTrade failed or was not accepted by Hyperliquid.\033[0m")
+                    except Exception as e:
+                        print(f"❌ \033[1mError placing trade on Hyperliquid: {e}\033[0m")
+                else:
+                    print(f"📊 \033[1mRisk/Reward\033[0m: {rr:.3f}")
+                    print(f"🚀 \033[1mPLACING TRADE\033[0m: {signal}")
+                    try:
+                        result = execute_trade(signal)
+                        print("Hyperliquid trade result:", result)
+                        if result and result.get("main_order") and result["main_order"].get("status") == "ok":
+                            print("✅ \033[1mTrade placed successfully on Hyperliquid.\033[0m")
+                            if result.get("sl_order_id"):
+                                print(f"🛑 Stop loss order ID: {result['sl_order_id']}")
+                            if result.get("tp_order_id"):
+                                print(f"🎯 Take profit order ID: {result['tp_order_id']}")
+                            notification_service.send_notification(
+                                title=f"{side} | R/R {rr:.1f} | BTCUSD",
+                                message=f"{side} trade placed at {entry_price} (SL: {stop_loss}, TP: {take_profit}, R/R: {rr:.1f})",
+                                priority=1
+                            )
+                            print(f"[Pushover] Notification sent.")
+                        else:
+                            print("❌ \033[1mTrade failed or was not accepted by Hyperliquid.\033[0m")
+                    except Exception as e:
+                        print(f"❌ \033[1mError placing trade on Hyperliquid: {e}\033[0m")
                 print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
             # --- End Hyperliquid trade execution ---
         else:
